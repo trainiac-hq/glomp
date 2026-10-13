@@ -6,15 +6,15 @@ import glomp
 import glomp/frame
 
 /// A test client: no heart-beats, 20ms reconnect, events forwarded.
-pub fn test_client(port: Int, events: Subject(glomp.Event)) -> glomp.Builder {
+pub fn test_client(port: Int, events: Subject(glomp.Event)) -> glomp.Client {
   glomp.new(host: "127.0.0.1", port:)
   |> glomp.heart_beat(send_ms: 0, receive_ms: 0)
   |> glomp.reconnect(first_ms: 20, longest_ms: 80)
   |> glomp.on_event(process.send(events, _))
 }
 
-pub fn start(builder: glomp.Builder) -> glomp.Client {
-  let assert Ok(started) = glomp.start(builder)
+pub fn start(client: glomp.Client) -> glomp.Client {
+  let assert Ok(started) = glomp.start(client)
 
   started.data
 }
@@ -38,11 +38,11 @@ pub fn connected(events: Subject(glomp.Event)) -> glomp.Session {
 
 /// Start a client and complete the handshake.
 pub fn connect(
-  builder: glomp.Builder,
+  client: glomp.Client,
   server: broker.Broker,
   events: Subject(glomp.Event),
 ) -> #(glomp.Client, Peer) {
-  let client = start(builder)
+  let client = start(client)
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
   assert connected(events).version == frame.Stomp12

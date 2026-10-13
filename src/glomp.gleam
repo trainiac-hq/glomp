@@ -4,12 +4,11 @@
 //// messages and subscribe to destinations.
 ////
 //// ```gleam
-//// let assert Ok(started) =
+//// let client =
 ////   glomp.new(host: "localhost", port: 61_613)
 ////   |> glomp.credentials(login: "guest", passcode: "guest")
-////   |> glomp.start
-//// let client = started.data
 ////
+//// let assert Ok(started) = glomp.start(client)
 //// let assert Ok(Nil) = glomp.await_connected(client, within: 5000)
 //// let assert Ok(Nil) =
 ////   glomp.send(client, glomp.message(to: "/queue/jobs", body: <<"hi">>))
@@ -34,24 +33,33 @@ import glomp/internal/socket
 import glomp/internal/transport.{type Transport}
 import glomp/network.{type NetworkError, type Trust}
 
-/// The settings for a client, before it starts.
+/// A client and its settings.
 ///
-/// You get a `Builder` from `new`. Change it with functions such as
-/// `credentials`, `tls` and `with_subscription`, then pass it to `start`
+/// You get a `Client` from `new`. Change its settings with functions such
+/// as `credentials`, `tls` and `with_subscription`, then pass it to `start`
 /// or `supervised`:
 ///
 /// ```gleam
-/// let builder =
+/// let client =
 ///   glomp.new(host: "localhost", port: 61_613)
 ///   |> glomp.credentials(login: "guest", passcode: "guest")
 ///
-/// let assert Ok(started) = glomp.start(builder)
+/// let assert Ok(started) = glomp.start(client)
+/// let assert Ok(Nil) = glomp.await_connected(client, within: 5000)
 /// ```
 ///
-/// You can keep the `Builder` after the client starts. Pass it to `client`
-/// to get the client's handle at any time.
-pub opaque type Builder {
-  Builder(
+/// Every function that talks to the broker takes the same `Client`, such
+/// as `send`, `subscribe`, `ack` and `stop`. You can use it from any
+/// process.
+///
+/// A `Client` finds its running process by name, so it keeps working after
+/// a supervisor restarts the client. While the client is stopped, calls
+/// with it crash, because no process has that name.
+///
+/// Change the settings before you start the client. A running client keeps
+/// the settings it started with.
+pub opaque type Client {
+  Client(
     host: String,
     port: Int,
     virtual_host: String,
@@ -76,8 +84,8 @@ pub opaque type Builder {
 /// an atom, which is a name the Erlang VM keeps forever. The VM can only
 /// hold a fixed number of atoms, so calling `new` over and over while your
 /// program runs will eventually crash the VM.
-pub fn new(host host: String, port port: Int) -> Builder {
-  Builder(
+pub fn new(host host: String, port port: Int) -> Client {
+  Client(
     host:,
     port:,
     virtual_host: host,
@@ -103,42 +111,42 @@ pub fn new(host host: String, port port: Int) -> Builder {
 /// expect that. If `login` or `passcode` contains a line feed, the header
 /// ends there and the broker reads the rest as a separate header.
 pub fn credentials(
-  builder: Builder,
+  client: Client,
   login login: String,
   passcode passcode: String,
-) -> Builder {
-  Builder(..builder, login: Some(#(login, passcode)))
+) -> Client {
+  Client(..client, login: Some(#(login, passcode)))
 }
 
 /// Set the `host` header, which picks a virtual host on the broker. It
 /// defaults to the broker's host name. RabbitMQ calls this a vhost.
-pub fn virtual_host(builder: Builder, virtual_host: String) -> Builder {
-  Builder(..builder, virtual_host:)
+pub fn virtual_host(client: Client, virtual_host: String) -> Client {
+  Client(..client, virtual_host:)
 }
 
 /// Set the `client-id` header. ActiveMQ and Artemis use it to keep durable
 /// subscriptions across reconnects. They allow only one connection per id
 /// at a time, so a second client with the same id is refused.
-pub fn client_id(builder: Builder, id: String) -> Builder {
-  connect_header(builder, "client-id", id)
+pub fn client_id(client: Client, id: String) -> Client {
+  connect_header(client, "client-id", id)
 }
 
 /// Add a header to the CONNECT frame.
 pub fn connect_header(
-  builder: Builder,
+  client: Client,
   name name: String,
   value value: String,
-) -> Builder {
-  Builder(
-    ..builder,
-    connect_headers: list.append(builder.connect_headers, [#(name, value)]),
+) -> Client {
+  Client(
+    ..client,
+    connect_headers: list.append(client.connect_headers, [#(name, value)]),
   )
 }
 
 /// Connect over TLS. Pass the broker's TLS port to `new`. Many brokers
 /// use port 61614 for this.
-pub fn tls(builder: Builder, trust trust: Trust) -> Builder {
-  Builder(..builder, security: socket.Tls(trust:))
+pub fn tls(client: Client, trust trust: Trust) -> Client {
+  Client(..client, security: socket.Tls(trust:))
 }
 
 /// Set the heart-beat intervals, in milliseconds. A heart-beat is a small
@@ -156,27 +164,27 @@ pub fn tls(builder: Builder, trust trust: Trust) -> Builder {
 /// delivers one in time. If two whole intervals pass with nothing from the
 /// broker, the client disconnects with `HeartBeatMissed`.
 pub fn heart_beat(
-  builder: Builder,
+  client: Client,
   send_ms send_ms: Int,
   receive_ms receive_ms: Int,
-) -> Builder {
-  Builder(
-    ..builder,
+) -> Client {
+  Client(
+    ..client,
     heart_beat_send_ms: int.max(send_ms, 0),
     heart_beat_receive_ms: int.max(receive_ms, 0),
   )
 }
 
 /// Set the time limit for one connection attempt, in milliseconds.
-pub fn connect_timeout(builder: Builder, milliseconds: Int) -> Builder {
-  Builder(..builder, connect_timeout_ms: milliseconds)
+pub fn connect_timeout(client: Client, milliseconds: Int) -> Client {
+  Client(..client, connect_timeout_ms: milliseconds)
 }
 
 /// Set the largest frame the client will accept. This stops one huge frame
 /// from using up memory. If a larger frame arrives, the client closes the
 /// connection with `Malformed`.
-pub fn limits(builder: Builder, limits: frame.Limits) -> Builder {
-  Builder(..builder, limits:)
+pub fn limits(client: Client, limits: frame.Limits) -> Client {
+  Client(..client, limits:)
 }
 
 /// Set how long to wait before reconnecting, in milliseconds.
@@ -186,14 +194,14 @@ pub fn limits(builder: Builder, limits: frame.Limits) -> Builder {
 /// attempts. Once a connection stays up for `longest_ms`, the wait goes
 /// back to `first_ms`.
 pub fn reconnect(
-  builder: Builder,
+  client: Client,
   first_ms first_ms: Int,
   longest_ms longest_ms: Int,
-) -> Builder {
+) -> Client {
   let first_ms = int.max(first_ms, 1)
 
-  Builder(
-    ..builder,
+  Client(
+    ..client,
     retry_first_ms: first_ms,
     retry_longest_ms: int.max(longest_ms, first_ms),
   )
@@ -211,20 +219,17 @@ pub fn reconnect(
 /// The client subscribes on every connection, in the order you added them.
 ///
 /// To add one to a client that is already running, use `subscribe`.
-pub fn with_subscription(
-  builder: Builder,
-  subscription: Subscription,
-) -> Builder {
-  Builder(
-    ..builder,
-    subscriptions: list.append(builder.subscriptions, [subscription]),
+pub fn with_subscription(client: Client, subscription: Subscription) -> Client {
+  Client(
+    ..client,
+    subscriptions: list.append(client.subscriptions, [subscription]),
   )
 }
 
 /// Set a function to receive `Event`s. It runs in the handler process,
 /// in the same order as your message handlers.
-pub fn on_event(builder: Builder, handler: fn(Event) -> Nil) -> Builder {
-  Builder(..builder, on_event: Some(handler))
+pub fn on_event(client: Client, handler: fn(Event) -> Nil) -> Client {
+  Client(..client, on_event: Some(handler))
 }
 
 // ------------------------------------------------------------ subscriptions
@@ -616,19 +621,6 @@ pub type Stopped {
 
 // ---------------------------------------------------------------- the client
 
-/// A handle to a running client. You can use it from any process.
-///
-/// You get a `Client` from `start`'s result, or from `client` with the
-/// same `Builder`. Every function that talks to the broker takes it, such
-/// as `send`, `subscribe`, `ack` and `stop`.
-///
-/// The handle finds the client by name, so it keeps working after a
-/// supervisor restarts the client. While the client is stopped, calls
-/// with it crash.
-pub opaque type Client {
-  Client(subject: Subject(Signal))
-}
-
 /// Messages sent to the client process.
 type Signal {
   Subscribing(
@@ -688,40 +680,31 @@ type Established {
 /// It fails if two subscriptions share an id, or if this client is already
 /// running.
 pub fn start(
-  builder: Builder,
+  client: Client,
 ) -> Result(actor.Started(Client), actor.StartError) {
   use Nil <- result.try(
-    unique_ids(builder.subscriptions, [])
+    unique_ids(client.subscriptions, [])
     |> result.map_error(actor.InitFailed),
   )
 
   let parent = process.self()
 
-  use started <- result.map(
-    actor.new_with_initialiser(5000, initialise(builder, parent, _))
-    |> actor.on_message(handle)
-    |> actor.named(builder.name)
-    |> actor.start,
-  )
-
-  actor.Started(pid: started.pid, data: client(builder))
+  actor.new_with_initialiser(5000, initialise(client, parent, _))
+  |> actor.on_message(handle)
+  |> actor.named(client.name)
+  |> actor.start
 }
 
-/// A child specification for a supervisor. Use `client` to get the handle.
+/// A child specification for a supervisor.
 ///
 /// When the supervisor shuts it down, the client sends DISCONNECT first.
-pub fn supervised(builder: Builder) -> supervision.ChildSpecification(Client) {
-  supervision.worker(fn() { start(builder) })
+pub fn supervised(client: Client) -> supervision.ChildSpecification(Client) {
+  supervision.worker(fn() { start(client) })
 }
 
-/// Get the handle for a client. You can get it before the client starts,
-/// and it keeps working after restarts.
-///
-/// The handle finds the client process by name. If you call a function
-/// while the client is stopped, the call crashes, because no process has
-/// that name.
-pub fn client(builder: Builder) -> Client {
-  Client(process.named_subject(builder.name))
+/// The subject of the client's process, found by name.
+fn subject(client: Client) -> Subject(Signal) {
+  process.named_subject(client.name)
 }
 
 /// Wait up to `within_ms` for the client to connect.
@@ -734,7 +717,7 @@ pub fn await_connected(
 ) -> Result(Nil, Nil) {
   let reply = process.new_subject()
 
-  process.send(client.subject, Awaiting(reply, clock.now_ms() + within_ms))
+  process.send(subject(client), Awaiting(reply, clock.now_ms() + within_ms))
   process.receive(reply, within_ms)
 }
 
@@ -743,7 +726,7 @@ pub fn await_connected(
 ///
 /// Errors: `NotConnected`, `ConnectionLost`, `Expired`.
 pub fn send(client: Client, outbound: Outbound) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Sending(outbound, None, _))
+  process.call_forever(subject(client), Sending(outbound, None, _))
 }
 
 /// Send a message and wait for the broker's receipt. A receipt is the
@@ -755,7 +738,7 @@ pub fn send_confirmed(
   outbound: Outbound,
   within within_ms: Int,
 ) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Sending(outbound, Some(within_ms), _))
+  process.call_forever(subject(client), Sending(outbound, Some(within_ms), _))
 }
 
 /// Add a subscription to a running client. If the client is connected, it
@@ -767,27 +750,32 @@ pub fn subscribe(
   client: Client,
   subscription: Subscription,
 ) -> Result(Nil, AlreadySubscribed) {
-  process.call_forever(client.subject, Subscribing(subscription, _))
+  process.call_forever(subject(client), Subscribing(subscription, _))
 }
 
 /// Remove a subscription. Messages the broker had already sent for it
 /// arrive as `Dropped` events.
 pub fn unsubscribe(client: Client, id: String) -> Result(Nil, NotSubscribed) {
-  process.call_forever(client.subject, Unsubscribing(id, _))
+  process.call_forever(subject(client), Unsubscribing(id, _))
 }
 
 /// Tell the broker you handled a deferred message, by sending ACK.
 ///
 /// Errors: `Expired`, `ConnectionLost`.
 pub fn ack(client: Client, delivery: Delivery) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Acknowledging(delivery, SendAck, None, _))
+  process.call_forever(subject(client), Acknowledging(
+    delivery,
+    SendAck,
+    None,
+    _,
+  ))
 }
 
 /// Tell the broker you did not handle a deferred message, by sending NACK.
 ///
 /// Errors: `Expired`, `ConnectionLost`.
 pub fn nack(client: Client, delivery: Delivery) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Acknowledging(
+  process.call_forever(subject(client), Acknowledging(
     delivery,
     SendNack,
     None,
@@ -801,7 +789,7 @@ pub fn ack_in(
   delivery: Delivery,
   transaction: Transaction,
 ) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Acknowledging(
+  process.call_forever(subject(client), Acknowledging(
     delivery,
     SendAck,
     Some(transaction),
@@ -815,7 +803,7 @@ pub fn nack_in(
   delivery: Delivery,
   transaction: Transaction,
 ) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Acknowledging(
+  process.call_forever(subject(client), Acknowledging(
     delivery,
     SendNack,
     Some(transaction),
@@ -828,7 +816,7 @@ pub fn nack_in(
 ///
 /// Errors: `NotConnected`, `ConnectionLost`.
 pub fn begin(client: Client) -> Result(Transaction, Error) {
-  process.call_forever(client.subject, Beginning)
+  process.call_forever(subject(client), Beginning)
 }
 
 /// Commit a transaction and wait for the broker's receipt.
@@ -839,14 +827,14 @@ pub fn commit(
   transaction: Transaction,
   within within_ms: Int,
 ) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Committing(transaction, within_ms, _))
+  process.call_forever(subject(client), Committing(transaction, within_ms, _))
 }
 
 /// Abort a transaction.
 ///
 /// Errors: `Expired`, `ConnectionLost`.
 pub fn abort(client: Client, transaction: Transaction) -> Result(Nil, Error) {
-  process.call_forever(client.subject, Aborting(transaction, _))
+  process.call_forever(subject(client), Aborting(transaction, _))
 }
 
 /// Stop a client started with `start`.
@@ -855,16 +843,25 @@ pub fn abort(client: Client, transaction: Transaction) -> Result(Nil, Error) {
 /// then it closes the socket and exits. Any handlers still running are
 /// killed.
 ///
-/// A supervised client comes straight back if you stop it this way. The
-/// client disconnects and exits, its supervisor sees that it has exited,
-/// and the supervisor starts a new client that connects again. To stop a
-/// supervised client for good, stop its supervisor.
+/// A supervisor normally starts a stopped client again. The client
+/// disconnects and exits, its supervisor sees that it has exited, and the
+/// supervisor starts a new client that connects again.
+///
+/// To stop a supervised client for good, stop its supervisor. You can also
+/// give the client the `Transient` restart strategy. A supervisor only
+/// restarts a transient child after a crash, so the client stays stopped
+/// after `stop`:
+///
+/// ```gleam
+/// glomp.supervised(client)
+/// |> supervision.restart(supervision.Transient)
+/// ```
 pub fn stop(client: Client) -> Stopped {
-  let assert Ok(pid) = process.subject_owner(client.subject)
+  let assert Ok(pid) = process.subject_owner(subject(client))
     as "glomp: the client is not running"
 
   let monitor = process.monitor(pid)
-  let stopped = process.call_forever(client.subject, Stopping)
+  let stopped = process.call_forever(subject(client), Stopping)
 
   let exit_reason =
     process.new_selector()
@@ -883,7 +880,7 @@ pub fn stop(client: Client) -> Stopped {
 
 type State {
   State(
-    config: Builder,
+    config: Client,
     self: Subject(Signal),
     handlers: Subject(HandlerMessage),
     subscriptions: List(Subscription),
@@ -944,7 +941,7 @@ const max_unhandled = 64
 const disconnect_timeout_ms = 2000
 
 fn initialise(
-  config: Builder,
+  config: Client,
   parent: Pid,
   self: Subject(Signal),
 ) -> Result(actor.Initialised(State, Signal, Client), String) {
@@ -985,7 +982,7 @@ fn initialise(
     serial: 0,
   ))
   |> actor.selecting(selector)
-  |> actor.returning(Client(self))
+  |> actor.returning(config)
 }
 
 fn unique_ids(
@@ -1007,7 +1004,7 @@ fn unique_ids(
 
 /// Start the linked process that runs handlers and `on_event`.
 fn start_handlers(
-  config: Builder,
+  config: Client,
   client: Subject(Signal),
 ) -> Result(actor.Started(Subject(HandlerMessage)), actor.StartError) {
   actor.new(Handlers(client:, on_event: config.on_event, handlers: dict.new()))
@@ -1330,7 +1327,7 @@ fn start_connecting(state: State) -> State {
 /// Runs in the connector process. It connects, does the handshake and
 /// hands over the socket.
 fn open_connection(
-  config: Builder,
+  config: Client,
   owner: Pid,
 ) -> Result(Established, Disconnect) {
   let deadline = clock.now_ms() + config.connect_timeout_ms
@@ -1365,7 +1362,7 @@ fn open_connection(
   reason
 }
 
-fn connect_frame(config: Builder) -> Frame {
+fn connect_frame(config: Client) -> Frame {
   let login = case config.login {
     Some(#(login, passcode)) -> [#("login", login), #("passcode", passcode)]
     None -> []
@@ -1390,7 +1387,7 @@ fn connect_frame(config: Builder) -> Frame {
 
 /// Wait for the broker's reply to CONNECT.
 fn handshake(
-  config: Builder,
+  config: Client,
   connecting: Transport,
   deadline: Int,
 ) -> Result(Established, Disconnect) {
@@ -1428,7 +1425,7 @@ fn ended_reason(ended: transport.Ended) -> Result(Disconnect, Nil) {
   }
 }
 
-fn session(config: Builder, connected: Frame) -> Result(Session, Disconnect) {
+fn session(config: Client, connected: Frame) -> Result(Session, Disconnect) {
   use version <- result.map(case frame.header(connected, "version") {
     Ok("1.2") -> Ok(frame.Stomp12)
     Ok("1.1") -> Ok(frame.Stomp11)

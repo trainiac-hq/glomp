@@ -6,6 +6,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor
+import gleam/otp/supervision
 import gleeunit
 import glomp
 import glomp/frame.{Frame}
@@ -16,15 +17,15 @@ pub fn main() -> Nil {
 }
 
 /// A test client: no heart-beats, 20ms reconnect, events forwarded.
-fn test_client(port: Int, events: Subject(glomp.Event)) -> glomp.Builder {
+fn test_client(port: Int, events: Subject(glomp.Event)) -> glomp.Client {
   glomp.new(host: "127.0.0.1", port:)
   |> glomp.heart_beat(send_ms: 0, receive_ms: 0)
   |> glomp.reconnect(first_ms: 20, longest_ms: 80)
   |> glomp.on_event(process.send(events, _))
 }
 
-fn start(builder: glomp.Builder) -> glomp.Client {
-  let assert Ok(started) = glomp.start(builder)
+fn start(client: glomp.Client) -> glomp.Client {
+  let assert Ok(started) = glomp.start(client)
 
   started.data
 }
@@ -37,11 +38,11 @@ fn connected(events: Subject(glomp.Event)) -> glomp.Session {
 
 /// Start a client and complete the handshake.
 fn connect(
-  builder: glomp.Builder,
+  client: glomp.Client,
   server: broker.Broker,
   events: Subject(glomp.Event),
 ) -> #(glomp.Client, Peer) {
-  let client = start(builder)
+  let client = start(client)
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
   assert connected(events).version == frame.Stomp12
@@ -1117,18 +1118,17 @@ pub fn stop_test() {
 pub fn a_handler_may_send_test() {
   let server = broker.start()
   let events = process.new_subject()
-  let builder = test_client(server.port, events)
-  let handle = glomp.client(builder)
+  let base = test_client(server.port, events)
 
   let #(client, peer) =
-    builder
+    base
     |> glomp.with_subscription(
       glomp.subscription(
         id: "in",
         destination: "/queue/in",
         handler: fn(message) {
           assert glomp.send(
-              handle,
+              base,
               glomp.message(to: "/queue/out", body: message.body),
             )
             == Ok(Nil)
@@ -1215,14 +1215,13 @@ pub fn supervised_test() {
 
   let server = broker.start()
   let events = process.new_subject()
-  let builder = test_client(server.port, events)
+  let client = test_client(server.port, events)
 
   let assert Ok(supervisor) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(glomp.supervised(builder))
+    |> static_supervisor.add(glomp.supervised(client))
     |> static_supervisor.start
 
-  let client = glomp.client(builder)
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
   assert connected(events).version == frame.Stomp12
@@ -1267,11 +1266,11 @@ pub fn a_killed_supervisor_stops_the_client_test() {
 
   let server = broker.start()
   let events = process.new_subject()
-  let builder = test_client(server.port, events)
+  let client = test_client(server.port, events)
 
   let assert Ok(supervisor) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(glomp.supervised(builder))
+    |> static_supervisor.add(glomp.supervised(client))
     |> static_supervisor.start
 
   let #(connect, peer) = broker.accept_stomp(server.listener)
@@ -1303,17 +1302,17 @@ pub fn a_supervisor_restarts_a_stopped_client_test() {
 
   let server = broker.start()
   let events = process.new_subject()
-  let builder = test_client(server.port, events)
+  let client = test_client(server.port, events)
 
   let assert Ok(supervisor) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(glomp.supervised(builder))
+    |> static_supervisor.add(glomp.supervised(client))
     |> static_supervisor.start
 
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
   assert connected(events).version == frame.Stomp12
-  assert stop(glomp.client(builder), peer) == glomp.Graceful
+  assert stop(client, peer) == glomp.Graceful
 
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
@@ -1327,6 +1326,30 @@ pub fn a_supervisor_restarts_a_stopped_client_test() {
   broker.send_receipt(peer, disconnect)
 
   assert broker.closes(peer, within: 1000)
+}
+
+/// A transient supervised client stays stopped after `stop`.
+pub fn a_transient_client_stays_stopped_test() {
+  process.trap_exits(True)
+
+  let server = broker.start()
+  let events = process.new_subject()
+  let client = test_client(server.port, events)
+
+  let assert Ok(supervisor) =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(
+      glomp.supervised(client) |> supervision.restart(supervision.Transient),
+    )
+    |> static_supervisor.start
+
+  let #(connect, peer) = broker.accept_stomp(server.listener)
+  assert connect.command == frame.Connect
+  assert connected(events).version == frame.Stomp12
+  assert stop(client, peer) == glomp.Graceful
+  assert broker.nobody_connects(server.listener, within: 150)
+
+  process.send_abnormal_exit(supervisor.pid, atom.create("shutdown"))
 }
 
 /// `stop` also stops the helper processes.
@@ -1353,7 +1376,7 @@ pub fn a_crashing_handler_restarts_the_client_test() {
   let server = broker.start()
   let events = process.new_subject()
 
-  let builder =
+  let client =
     test_client(server.port, events)
     |> glomp.with_subscription(
       glomp.subscription(id: "a", destination: "/topic/a", handler: fn(message) {
@@ -1363,7 +1386,7 @@ pub fn a_crashing_handler_restarts_the_client_test() {
 
   let assert Ok(supervisor) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(glomp.supervised(builder))
+    |> static_supervisor.add(glomp.supervised(client))
     |> static_supervisor.start
 
   let #(connect, peer) = broker.accept_stomp(server.listener)
@@ -1407,7 +1430,7 @@ pub fn tls_test() {
   let events = process.new_subject()
   let messages = process.new_subject()
 
-  let builder =
+  let client =
     glomp.new(host: "localhost", port: server.port)
     |> glomp.heart_beat(send_ms: 0, receive_ms: 0)
     |> glomp.reconnect(first_ms: 20, longest_ms: 80)
@@ -1421,7 +1444,7 @@ pub fn tls_test() {
     )
 
   let trusted =
-    builder
+    client
     |> glomp.tls(trust: network.CertificateFile(server.authority))
     |> start
 
@@ -1448,7 +1471,7 @@ pub fn tls_test() {
   assert sent.body == <<"x":utf8>>
   assert stop(trusted, peer) == glomp.Graceful
 
-  let unverified = builder |> glomp.tls(trust: network.Unverified) |> start
+  let unverified = client |> glomp.tls(trust: network.Unverified) |> start
   let #(connect, peer) = broker.accept_stomp(server.listener)
   assert connect.command == frame.Connect
   assert connected(events).version == frame.Stomp12
@@ -1541,10 +1564,10 @@ pub fn stops_with_its_parent_test() {
 
 /// A stopped client can be started again immediately.
 pub fn a_stopped_client_can_be_started_again_test() {
-  let builder = glomp.new(host: "127.0.0.1", port: broker.free_port())
+  let client = glomp.new(host: "127.0.0.1", port: broker.free_port())
 
   list.each([1, 2, 3], fn(round) {
-    let client = start(builder)
+    let client = start(client)
     assert glomp.stop(client) == glomp.Idle as { int.to_string(round) }
   })
 }

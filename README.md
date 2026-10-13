@@ -26,19 +26,18 @@ pub fn main() {
       handler: fn(message) { io.println(string.inspect(message.body)) },
     )
 
-  let builder =
+  let client =
     glomp.new(host: "broker.example.com", port: 61_613)
     |> glomp.credentials(login: "user", passcode: "secret")
     |> glomp.with_subscription(greetings)
 
   let assert Ok(supervisor) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(glomp.supervised(builder))
+    |> static_supervisor.add(glomp.supervised(client))
     |> static_supervisor.start
 
   io.println("Supervisor started as " <> string.inspect(supervisor.pid))
 
-  let client = glomp.client(builder)
   let assert Ok(Nil) = glomp.await_connected(client, within: 5000)
 
   let assert Ok(Nil) =
