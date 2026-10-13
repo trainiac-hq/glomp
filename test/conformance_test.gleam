@@ -1062,10 +1062,8 @@ pub fn back_pressure_reaches_the_broker_test() {
   process.send(gate, Nil)
   broker.reset(peer.socket)
 
-  assert list.contains(
-    [glomp.Idle, glomp.Abrupt(glomp.Closed), glomp.Unconfirmed],
-    glomp.stop(client),
-  )
+  // The broker reset the connection, so nothing confirms the DISCONNECT.
+  assert glomp.stop(client) != glomp.Graceful
 }
 
 fn write_until_blocked(

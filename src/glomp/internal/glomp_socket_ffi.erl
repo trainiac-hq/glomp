@@ -19,11 +19,15 @@ send({ssl, Socket}, Data) -> to_result(ssl:send(Socket, Data)).
 recv({tcp, Socket}, Timeout) -> to_result(gen_tcp:recv(Socket, 0, Timeout));
 recv({ssl, Socket}, Timeout) -> to_result(ssl:recv(Socket, 0, Timeout)).
 
-set_active_once({tcp, Socket}) -> to_result(inet:setopts(Socket, [{active, once}]));
-set_active_once({ssl, Socket}) -> to_result(ssl:setopts(Socket, [{active, once}])).
+set_active_once({tcp, Socket}) -> options_set(inet:setopts(Socket, [{active, once}]));
+set_active_once({ssl, Socket}) -> options_set(ssl:setopts(Socket, [{active, once}])).
 
-set_passive({tcp, Socket}) -> to_result(inet:setopts(Socket, [{active, false}]));
-set_passive({ssl, Socket}) -> to_result(ssl:setopts(Socket, [{active, false}])).
+set_passive({tcp, Socket}) -> options_set(inet:setopts(Socket, [{active, false}]));
+set_passive({ssl, Socket}) -> options_set(ssl:setopts(Socket, [{active, false}])).
+
+%% Setting options on a closed socket fails with einval.
+options_set({error, einval}) -> {error, closed};
+options_set(Result) -> to_result(Result).
 
 hand_over({tcp, Socket}, Pid) -> to_result(gen_tcp:controlling_process(Socket, Pid));
 hand_over({ssl, Socket}, Pid) -> to_result(ssl:controlling_process(Socket, Pid)).
