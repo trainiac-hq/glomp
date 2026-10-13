@@ -1,0 +1,42 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4
+        ports:
+          - 61613:61613
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 12
+      activemq:
+        image: apache/activemq-classic:6.1.7
+        ports:
+          - 61614:61613
+    steps:
+      - uses: actions/checkout@v6
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          gleam-version: '1.19.1'
+          rebar3-version: '3'
+      - run: gleam deps download
+      - run: gleam build --warnings-as-errors
+      - run: gleam format --check src test
+      - name: Enable STOMP on RabbitMQ
+        run: |
+          docker exec ${{ job.services.rabbitmq.id }} rabbitmq-plugins enable rabbitmq_stomp
+          docker exec ${{ job.services.rabbitmq.id }} rabbitmq-diagnostics -q check_port_listener 61613
+      - run: gleam test
+        env:
+          GLOMP_REAL_BROKERS: 'localhost:61613:guest:guest localhost:61614:admin:admin'
